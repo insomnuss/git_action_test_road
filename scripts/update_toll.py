@@ -232,7 +232,12 @@ def main() -> int:
         log("TOLL_SERVICE_KEY 환경변수가 없다. GitHub Secrets에 등록해야 한다.")
         return 2
 
-    base_url = os.environ.get("TOLL_API_URL", DEFAULT_API_URL).strip()
+    # os.environ.get(key, default)는 "키가 존재하는데 값이 빈 문자열"이면 기본값을
+    # 안 쓴다. GitHub Actions는 ${{ vars.TOLL_API_URL }}이 저장소에 정의 안 돼 있어도
+    # 환경변수 자체는 빈 문자열로 만들어 넘기므로(unset이 아니라 empty), get()의
+    # 기본값 인자가 무시되고 base_url이 빈 문자열이 되는 버그가 실제로 있었다
+    # (urllib이 "unknown url type: '?key=...'"로 실패). `or`로 빈 문자열도 폴백되게 한다.
+    base_url = (os.environ.get("TOLL_API_URL") or DEFAULT_API_URL).strip()
     extra_raw = os.environ.get("TOLL_API_PARAMS", "").strip()
     extra = dict(urllib.parse.parse_qsl(extra_raw)) if extra_raw else {}
 

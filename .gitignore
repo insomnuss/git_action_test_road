@@ -1,2 +1,4 @@
 __pycache__/
 *.pyc
+data/toll_fares.sqlite
+data/_toll_fares.sqlite.tmp

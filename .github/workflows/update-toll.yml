@@ -1,0 +1,84 @@
+name: 통행요금 데이터 갱신
+
+# 매주 월요일 03:00 KST(= 일요일 18:00 UTC)에 자동 실행 + 수동 실행 가능.
+# GitHub Actions는 UTC 기준이라 한국시간으로 환산해 적어둔다.
+on:
+  schedule:
+    - cron: "0 18 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: write        # 데이터 커밋 + 태그 푸시에 필요
+
+concurrency:
+  group: toll-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 데이터 태그 이름 결정
+        id: tag
+        run: echo "name=data-$(date -u +'%Y%m%d-%H%M')" >> "$GITHUB_OUTPUT"
+
+      - name: 통행요금 수집
+        env:
+          TOLL_SERVICE_KEY: ${{ secrets.TOLL_SERVICE_KEY }}
+          # 활용신청 후 받은 엔드포인트/파라미터가 스크립트 기본값과 다르면 여기서 덮어쓴다.
+          TOLL_API_URL: ${{ vars.TOLL_API_URL }}
+          TOLL_API_PARAMS: ${{ vars.TOLL_API_PARAMS }}
+          DATA_TAG: ${{ steps.tag.outputs.name }}
+        run: python scripts/update_toll.py
+
+      - name: 변경 여부 확인
+        id: diff
+        run: |
+          if git diff --quiet -- data/; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "요금 데이터에 변경 없음 - 커밋을 건너뛴다"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 내용이 그대로면 커밋하지 않는다. 매주 빈 커밋을 쌓으면 앱이 매번 새 버전으로
+      # 오인해 불필요한 다운로드를 하게 되고, 태그도 의미 없이 늘어난다.
+      - name: 커밋 및 태그
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git commit -m "chore: 통행요금 데이터 갱신 ($TAG)"
+          git push
+          git tag "$TAG"
+          git push origin "$TAG"
+
+      # manifest는 앱이 매번 확인하는 파일이라 태그로 고정할 수 없다(항상 최신이어야 함).
+      # jsDelivr의 브랜치 캐시는 12시간이라 갱신 직후엔 옛 파일이 내려가므로 강제로 비운다.
+      # 데이터 CSV는 manifest 안에서 태그 URL로 가리키므로 캐시 지연 영향을 받지 않는다.
+      - name: jsDelivr 캐시 purge (manifest)
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          curl -sS --fail-with-body \
+            "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@main/data/manifest.json" \
+            || echo "purge 실패(치명적이지 않음): 캐시가 만료되면 자연히 갱신된다"
+
+      - name: 요약
+        run: |
+          echo "### 통행요금 갱신 결과" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 변경됨: ${{ steps.diff.outputs.changed }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 태그: ${{ steps.tag.outputs.name }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f data/manifest.json ]; then
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat data/manifest.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi

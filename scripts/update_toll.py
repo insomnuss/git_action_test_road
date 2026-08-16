@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-한국도로공사 영업소간 통행요금 데이터를 공공데이터포털에서 받아 CSV + manifest로 저장한다.
+한국도로공사 영업소간 통행요금 조회 OpenAPI(data.go.kr/data/15111644)를 페이징 호출해
+build_toll_db.py(파일 방식)와 동일한 sqlite.gz + csv.gz + manifest.json을 만든다.
 
-GitHub Actions에서 주기적으로 돌리고, 결과 파일을 jsDelivr CDN으로 앱에 배포하는 것이 목적이다.
-앱은 manifest.json만 먼저 받아 버전/해시를 비교하고, 바뀌었을 때만 CSV를 내려받는다.
+두 파이프라인의 출력 스키마가 같으므로 앱은 어느 쪽이 만들었는지 몰라도 된다.
 
 설계 메모
 - 표준 라이브러리만 쓴다. CI에서 pip 설치 단계를 없애 빌드가 빠르고 덜 깨진다.
-- 응답 스키마를 미리 고정하지 않는다. 공공데이터포털 API 상세 규격이 활용신청 후에만
-  공개되는데, 필드명을 잘못 박아두면 조용히 빈 데이터를 만들게 된다. 그래서 응답에 들어온
-  키를 모아서 CSV 컬럼을 구성한다 - 규격을 몰라도 데이터가 통째로 보존된다.
-- 실패 시 기존 파일을 덮어쓰지 않는다. 반쯤 받다 만 데이터가 CDN에 올라가면
-  앱 전체가 잘못된 요금을 보게 되므로, 전부 받은 뒤에만 파일을 교체한다.
+- 실제 API 응답 필드명은 서비스키를 발급받아 호출해보기 전까진 확정할 수 없다
+  (공공데이터포털 페이지에 상세 스펙이 없음). 그래서 toll_schema.FIELD_ALIASES의
+  후보 키들로 매칭을 시도하고, 처음 받은 행의 매칭률이 너무 낮으면 즉시 실패하면서
+  실제로 들어온 키 목록을 그대로 로그에 남긴다. 그 로그를 보고 toll_schema.py의
+  FIELD_ALIASES에 한 줄만 추가하면 다음 실행부터 정상 매칭된다 - 조용히 빈 칸투성이
+  데이터를 커밋하는 사고를 막기 위함이다.
+- 실패 시 기존 파일을 덮어쓰지 않는다(toll_schema.build_outputs_from_rows가 보장).
 """
 
 from __future__ import annotations
 
-import csv
-import hashlib
 import json
 import os
 import sys
@@ -25,18 +25,22 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
 from pathlib import Path
 
-# ── 설정 ────────────────────────────────────────────────────────────────
-# 활용신청 후 받은 실제 엔드포인트로 바꾸거나 TOLL_API_URL 환경변수로 넘긴다.
-# 공공데이터포털 "한국도로공사_영업소간 통행요금 조회" (data.go.kr/data/15111644)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from toll_schema import FIELD_ALIASES, REQUIRED_COLUMNS, build_outputs_from_rows, normalize_row  # noqa: E402
+
 DEFAULT_API_URL = "https://apis.data.go.kr/B090041/openapi/service/TolInfoService/getTolInfo"
 
-PAGE_SIZE = 1000        # 공공데이터포털 표준 상한
-MAX_PAGES = 200         # 무한 루프 방지용 안전장치
+PAGE_SIZE = 1000
+MAX_PAGES = 500
 TIMEOUT_SEC = 30
 RETRY = 3
+
+# 첫 페이지 결과로 필드 매칭률을 판단한다. 표준 컬럼이 총 34개인데, 이 중 이만큼도
+# 못 채우면 별칭 표가 안 맞는다고 보고 중단한다(REQUIRED_COLUMNS는 별도로 하나라도
+# 비면 즉시 중단 - 그건 데이터를 아예 못 쓰는 수준이라서).
+MIN_MATCH_RATIO = 0.5
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = REPO_ROOT / "data"
@@ -47,7 +51,6 @@ def log(msg: str) -> None:
 
 
 def fetch_page(base_url: str, service_key: str, page_no: int, extra: dict[str, str]) -> dict:
-    """한 페이지를 받아 JSON으로 돌려준다. 일시적 실패는 지수 백오프로 재시도."""
     params = {
         "serviceKey": service_key,
         "pageNo": str(page_no),
@@ -83,9 +86,8 @@ def fetch_page(base_url: str, service_key: str, page_no: int, extra: dict[str, s
 
 def extract_rows(payload: dict) -> list[dict]:
     """
-    공공데이터포털 응답에서 행 목록을 꺼낸다.
-    기관마다 감싸는 구조가 달라서(response.body.items.item / list / data ...)
-    딕셔너리 리스트가 나오는 첫 지점을 찾아 쓴다.
+    공공데이터포털 응답에서 행 목록을 꺼낸다. 기관마다 감싸는 구조가 달라서
+    (response.body.items.item / list / data ...) 딕셔너리 리스트가 나오는 첫 지점을 찾는다.
     """
     def walk(node):
         if isinstance(node, list):
@@ -93,7 +95,6 @@ def extract_rows(payload: dict) -> list[dict]:
                 return node
             return None
         if isinstance(node, dict):
-            # item이 단일 객체로 오는 경우도 있다.
             for key in ("item", "items", "list", "data", "body", "response"):
                 if key in node:
                     found = walk(node[key])
@@ -107,7 +108,6 @@ def extract_rows(payload: dict) -> list[dict]:
 
     rows = walk(payload)
     if rows is None:
-        # 단일 item이 dict인 경우
         body = payload.get("response", {}).get("body", {})
         item = body.get("items", {})
         if isinstance(item, dict) and isinstance(item.get("item"), dict):
@@ -116,49 +116,70 @@ def extract_rows(payload: dict) -> list[dict]:
     return rows
 
 
-def download_all(base_url: str, service_key: str, extra: dict[str, str]) -> list[dict]:
-    all_rows: list[dict] = []
-    for page in range(1, MAX_PAGES + 1):
+def check_first_batch_or_die(raw_rows: list[dict]) -> None:
+    """
+    첫 페이지로 별칭 매칭이 그럴듯한지 확인한다. 여기서 실패하면 나머지 34만행을
+    받으러 다닐 필요가 없다 - 빨리 실패해서 CI 시간과 API 호출 쿼터를 아낀다.
+    """
+    if not raw_rows:
+        raise RuntimeError("첫 페이지가 비어 있다 - 파라미터를 확인해라")
+
+    sample = raw_rows[0]
+    std, matched = normalize_row(sample)
+    total = len(std)
+    ratio = matched / total
+
+    missing_required = [c for c in REQUIRED_COLUMNS if not std.get(c)]
+
+    log(f"필드 매칭 진단: {matched}/{total} ({ratio:.0%}) - 실제 응답 키: {sorted(sample.keys())}")
+
+    if missing_required or ratio < MIN_MATCH_RATIO:
+        lines = [
+            "필드 매칭률이 너무 낮아 중단한다 - toll_schema.py의 FIELD_ALIASES가 실제",
+            "API 응답 필드명과 안 맞는 것으로 보인다.",
+            "",
+            f"필수 컬럼 중 비어 있음: {missing_required or '없음'}",
+            f"전체 매칭률: {matched}/{total} ({ratio:.0%}, 최소 {MIN_MATCH_RATIO:.0%} 필요)",
+            "",
+            f"실제 응답의 첫 행 키 목록:\n  {sorted(sample.keys())}",
+            "",
+            "조치: 위 키 목록을 보고 scripts/toll_schema.py의 FIELD_ALIASES에서",
+            "해당 컬럼에 실제 키 이름을 추가한 뒤 다시 실행해라.",
+        ]
+        raise RuntimeError("\n".join(lines))
+
+
+def download_all(base_url: str, service_key: str, extra: dict[str, str]):
+    """정규화된 표준 행을 순서대로 내어주는 제너레이터. 첫 페이지에서 매칭을 검증한다."""
+    first_raw = fetch_page(base_url, service_key, 1, extra)
+    first_rows = extract_rows(first_raw)
+    check_first_batch_or_die(first_rows)
+
+    total = 0
+    for raw in first_rows:
+        std, _ = normalize_row(raw)
+        total += 1
+        yield std
+    log(f"  page 1: {len(first_rows)}건 (누적 {total})")
+
+    if len(first_rows) < PAGE_SIZE:
+        return
+
+    for page in range(2, MAX_PAGES + 1):
         payload = fetch_page(base_url, service_key, page, extra)
-        rows = extract_rows(payload)
-        if not rows:
+        raw_rows = extract_rows(payload)
+        if not raw_rows:
             log(f"  page {page}: 0건 - 수집 종료")
-            break
-        all_rows.extend(rows)
-        log(f"  page {page}: {len(rows)}건 (누적 {len(all_rows)})")
-        if len(rows) < PAGE_SIZE:
-            break
+            return
+        for raw in raw_rows:
+            std, _ = normalize_row(raw)
+            total += 1
+            yield std
+        log(f"  page {page}: {len(raw_rows)}건 (누적 {total})")
+        if len(raw_rows) < PAGE_SIZE:
+            return
         time.sleep(0.2)  # 서버 부담을 줄이는 최소한의 간격
-    else:
-        log(f"  경고: MAX_PAGES({MAX_PAGES}) 도달 - 데이터가 더 있을 수 있다")
-    return all_rows
-
-
-def write_csv(rows: list[dict], path: Path) -> list[str]:
-    """모든 행의 키를 합쳐 컬럼을 만든다(응답 스키마를 몰라도 손실 없이 저장)."""
-    columns: list[str] = []
-    seen = set()
-    for row in rows:
-        for k in row.keys():
-            if k not in seen:
-                seen.add(k)
-                columns.append(k)
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({k: row.get(k, "") for k in columns})
-    return columns
-
-
-def sha256_of(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 16), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    log(f"  경고: MAX_PAGES({MAX_PAGES}) 도달 - 데이터가 더 있을 수 있다")
 
 
 def main() -> int:
@@ -171,52 +192,31 @@ def main() -> int:
     extra_raw = os.environ.get("TOLL_API_PARAMS", "").strip()
     extra = dict(urllib.parse.parse_qsl(extra_raw)) if extra_raw else {}
 
-    repo = os.environ.get("GITHUB_REPOSITORY", "").strip()      # 예: user/repo
-    tag = os.environ.get("DATA_TAG", "").strip()                # 예: data-20260816-0300
+    repo = os.environ.get("GITHUB_REPOSITORY", "insomnuss/git_action_test_road").strip()
+    tag = os.environ.get("DATA_TAG", "").strip()
 
-    log(f"통행요금 수집 시작: {base_url}")
+    log(f"통행요금 수집 시작(OpenAPI): {base_url}")
     if extra:
         log(f"  추가 파라미터: {extra}")
 
-    rows = download_all(base_url, service_key, extra)
-    if not rows:
-        # 빈 결과로 기존 파일을 날리면 앱이 요금을 못 쓰게 된다. 실패로 처리해 커밋을 막는다.
-        log("수집된 데이터가 0건이다. 기존 파일을 유지하고 실패로 종료한다.")
+    try:
+        manifest = build_outputs_from_rows(
+            download_all(base_url, service_key, extra),
+            DATA_DIR,
+            source_label="한국도로공사 영업소간 통행요금 조회 (OpenAPI, data.go.kr/data/15111644)",
+            source_file_label=f"{base_url} (자동 수집)",
+            tag=tag,
+            repo=repo,
+        )
+    except SystemExit:
+        raise
+    except Exception as e:  # noqa: BLE001
+        log(f"수집 실패: {e}")
         return 1
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    csv_path = DATA_DIR / "toll_fares.csv"
-    columns = write_csv(rows, csv_path)
-
-    digest = sha256_of(csv_path)
-    size = csv_path.stat().st_size
-    now = datetime.now(timezone.utc).astimezone()
-
-    # 앱은 이 manifest만 먼저 받아 version/sha256을 비교하고, 바뀐 경우에만 CSV를 받는다.
-    # 데이터 파일 URL은 태그로 고정해 jsDelivr가 영구 캐싱하게 한다(캐시 지연 문제 회피).
-    ref = tag if tag else "main"
-    cdn_base = f"https://cdn.jsdelivr.net/gh/{repo}@{ref}" if repo else ""
-    manifest = {
-        "version": tag or now.strftime("%Y%m%d-%H%M"),
-        "generated_at": now.isoformat(timespec="seconds"),
-        "source": "한국도로공사 영업소간 통행요금 (공공데이터포털)",
-        "files": [
-            {
-                "name": "toll_fares.csv",
-                "rows": len(rows),
-                "columns": columns,
-                "bytes": size,
-                "sha256": digest,
-                "url": f"{cdn_base}/data/toll_fares.csv" if cdn_base else "",
-            }
-        ],
-    }
-    (DATA_DIR / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-
-    log(f"완료: {len(rows)}건, {size:,} bytes, sha256={digest[:16]}...")
-    log(f"컬럼({len(columns)}): {', '.join(columns[:12])}{' ...' if len(columns) > 12 else ''}")
+    log(f"완료: {manifest['rows']:,}건")
+    for f in manifest["files"]:
+        log(f"{f['name']:22} {f['bytes']:>12,} bytes")
     return 0
 
 

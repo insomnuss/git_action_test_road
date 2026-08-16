@@ -103,47 +103,65 @@ jsDelivr는 브랜치(`@main`) 경로를 **12시간** 캐싱한다. 파일을 �
 
 즉 앱 코드에 버전을 하드코딩하고 스토어 업데이트를 하는 방식이 필요 없다.
 
-## OpenAPI 자동화
+## OpenAPI 자동화 (검증 완료)
 
 `scripts/update_toll.py` + `.github/workflows/update-toll.yml`이 매주 월요일
 03:00(KST) 자동 실행되도록 만들어져 있다. `scripts/build_toll_db.py`(파일 방식)와
 `scripts/toll_schema.py`를 공유해서 **완전히 같은 컬럼의 sqlite.gz/csv.gz/manifest.json**을
 만든다 - 앱은 데이터가 어느 파이프라인에서 나왔는지 몰라도 된다.
 
-쓰려면:
+### 실제 API 위치 (data.go.kr이 아니라 data.ex.co.kr)
+
+data.go.kr의 [15111644](https://www.data.go.kr/data/15111644/openapi.do)는
+**링크형(Link API)**이다 - data.go.kr이 직접 프록시하지 않고, 실제로는 한국도로공사
+자체 포털(OpenOASIS, data.ex.co.kr)로 안내한다. 실제 요청 URL과 파라미터는 그 포털의
+API 상세 페이지(`data.ex.co.kr/openapi/basicinfo/openApiInfoM?apiId=0620`)에서 확인했고,
+실제 서비스키로 호출해 검증했다 - 응답의 count가 355,664로 FILE 데이터셋과 완전히
+일치한다(같은 데이터, 다른 배포 경로).
+
+```
+요청 URL : https://data.ex.co.kr/openapi/toll/bhoinstIntoTollList
+파라미터 : key(인증키), type(json/xml), pageNo, numOfRows,
+           그 외 선택: arrvTolofCd/Nm, dprtrTolofCd/Nm, hoinstCd
+```
+
+이 포털은 apis.data.go.kr 계열과 파라미터명이 다르다 - 인증키는 serviceKey가 아니라
+key, 포맷은 _type이 아니라 type이다. scripts/update_toll.py는 이미 이 규칙으로 맞춰져
+있다.
+
+### 서버가 페이지 크기를 강제한다 (중요, 실제로 겪은 버그)
+
+numOfRows를 1000으로 요청해도 서버는 실제로 99건만 돌려준다(응답의 numOfRows 필드
+자체가 99로 온다). 처음엔 "요청 건수보다 적게 왔으면 마지막 페이지"로 페이징 종료를
+판단했는데, 이 API에서는 모든 페이지가 항상 요청 건수보다 적게 오므로 매번 첫 페이지
+에서 멈춰버리는 버그가 있었다 - 355,664건 중 99건만 받고 끝났을 뻔했다.
+
+그래서 종료 조건을 응답의 count(전체 건수) 도달 여부로 바꿨다. 실측 기준 전체
+페이지 수는 약 3,593페이지(99건 x 3,593 = 355,664)다.
+
+### 필드 매칭도 검증했다
+
+toll_schema.py의 FIELD_ALIASES는 이제 실제 확인된 필드명이 1순위다(dprtrTolofCd,
+nrmlKnd1Amt 등 - 위 API 상세 페이지의 "출력결과" 표와 실제 호출 응답으로 대조 확인).
+실제 호출로 34개 표준 컬럼 100% 매칭을 확인했다.
+
+다만 API가 향후 필드명을 바꿀 가능성에 대비해 안전장치는 남겨뒀다 - 매칭률이 50%
+미만이거나 필수 컬럼(start_code/end_code/fare1)이 비면 즉시 중단하고 실제 응답 키
+목록을 로그에 남긴다. 그 목록을 보고 FIELD_ALIASES에 한 줄만 추가하면 된다.
+
+매칭 판단은 값이 아니라 키의 존재 여부로 한다 - 통행료 데이터는 할인 시간대가 없는
+구간처럼 정당한 null이 흔해서, 가장 첫 응답 행이 하필 그런 구간이면 값 기준 판단은
+매칭이 정상인데도 실패로 오판한다. 실측 중 실제로 겪은 문제라 고쳤다.
+
+### 쓰려면
 
 1. [영업소간 통행요금 조회(OpenAPI)](https://www.data.go.kr/data/15111644/openapi.do)에서
-   활용신청 → 서비스키 발급
-2. 저장소 Settings → Secrets and variables → Actions
-   - Secret `TOLL_SERVICE_KEY` (필수)
-   - Variable `TOLL_API_URL` / `TOLL_API_PARAMS` (엔드포인트가 스크립트 기본값과 다를 때만)
-3. Actions 탭 → "통행요금 데이터 갱신" → Run workflow로 먼저 수동 확인
+   활용신청 → 서비스키 발급 (도로공사 자체 포털 계정/키 체계라 data.go.kr의 일반적인
+   서비스키 발급 절차와 다를 수 있다)
+2. 저장소 Settings → Secrets and variables → Actions → Secret TOLL_SERVICE_KEY 등록
+3. Actions 탭 → "통행요금 데이터 갱신" → Run workflow로 실제 전체 수집 확인
+   (약 3,593회 API 호출 - 시간이 좀 걸린다)
 
-### 실제 API 응답 필드명은 아직 검증되지 않았다
-
-공공데이터포털에 이 API의 상세 스펙(정확한 응답 필드명)이 공개돼 있지 않다. 그래서
-`toll_schema.py`의 `FIELD_ALIASES`는 **추측**이다 - FILE 데이터셋의 실제 헤더에서
-확인된 한글 필드명(예: `출발영업소코드`)을 1순위 후보로 넣어뒀고, 포털이 두 데이터셋의
-"제공 항목"을 동일하게 설명하므로 맞을 가능성이 높지만 확정은 아니다.
-
-**틀려도 안전하게 실패한다.** `update_toll.py`는 첫 페이지를 받으면 즉시 표준 컬럼과의
-매칭률을 계산하고(`normalize_row`), 필수 컬럼(`start_code`/`end_code`/`fare1`)이 비어
-있거나 전체 매칭률이 50% 미만이면 나머지 34만 행을 마저 받으러 다니지 않고 그 자리에서
-멈춘다 - CI 시간과 API 쿼터를 아끼기 위함이다. 이때 에러 메시지에 **실제 응답에 들어온
-키 목록**이 그대로 찍힌다.
-
-```
-필드 매칭률이 너무 낮아 중단한다 - ...
-실제 응답의 첫 행 키 목록:
-  ['startTcsCode', 'startTcsName', 'tolFare1', ...]
-```
-
-이 목록을 보고 `scripts/toll_schema.py`의 `FIELD_ALIASES`에서 해당 컬럼에 실제 키
-이름을 한 줄 추가하면 다음 실행부터 정상 매칭된다. 조용히 빈 칸투성이 데이터를
-커밋하는 것보다 이렇게 명시적으로 실패하는 게 낫다는 판단이다.
-
-첫 실행(수동 트리거)에서 이 진단 로그를 확인하고 필요하면 별칭 표를 한 번 고쳐주면,
-그 뒤로는 스케줄이 알아서 돈다.
 
 ## 데이터가 그대로면 커밋하지 않는다
 

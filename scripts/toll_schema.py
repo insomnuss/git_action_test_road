@@ -30,31 +30,29 @@ TEXT_COLUMNS = {
 
 # 표준 컬럼 -> 원본 응답에서 있을 법한 필드명 후보(우선순위 순).
 #
-# 한글 이름은 "영업소간 통행요금 조회(FILE)" 데이터셋(data.go.kr/data/15117921)의
-# 실제 헤더에서 확인된 값이다 - 포털이 OpenAPI 버전(15111644)도 "동일한 제공 항목"이라고
-# 설명하므로 이 한글 키가 그대로 쓰일 가능성이 높다.
+# 1순위(각 리스트의 첫 값)는 data.ex.co.kr OpenOASIS 포털의 실제 API 상세 페이지
+# (apiId=0620, 요청 URL data.ex.co.kr/openapi/toll/bhoinstIntoTollList)에서 확인하고
+# 실제 서비스키로 호출까지 해서 검증한 진짜 필드명이다. 응답의 count가 355,664로
+# FILE 데이터셋과 완전히 일치하는 것도 확인했다 - 같은 데이터, 다른 배포 경로.
 #
-# 영문 키는 공공데이터포털의 흔한 네이밍 관례를 따른 추측이고, 실제로 서비스키를 받아
-# 호출해보기 전까지는 맞는다는 보장이 없다. 안 맞아도 안전하다 - normalize_row()가
-# 일치율을 세고, build_toll_db_from_rows()가 그 일치율이 너무 낮으면 즉시 실패하면서
-# 실제로 들어온 키 목록을 그대로 로그에 남긴다. 그 로그를 보고 아래 표에 한 줄만
-# 추가하면 다음 실행부터 정상 매칭된다 - 조용히 빈 칸투성이 데이터를 커밋하는 것보다 낫다.
+# 나머지 후보(2번째 이후)는 혹시 필드명이 버전업 등으로 바뀔 경우를 대비한 예비 추측이다.
+# 한글 이름은 FILE 데이터셋(data.go.kr/data/15117921) 헤더에서 확인된 값이다.
 FIELD_ALIASES: dict[str, list[str]] = {
-    "start_code": ["출발영업소코드", "startUnitCode", "stdIcCode", "startTcsCode", "startIcCode"],
-    "start_name": ["출발영업소명", "startUnitName", "stdIcName", "startTcsName", "startIcName"],
-    "end_code": ["도착영업소코드", "endUnitCode", "endTcsCode", "endIcCode"],
-    "end_name": ["도착영업소명", "endUnitName", "endTcsName", "endIcName"],
-    "operator_code": ["고속도로운영기관코드", "opCode", "routeOpCode", "corpCode"],
-    "operator_name": ["고속도로운영기관명", "opName", "routeOpName", "corpName"],
-    **{f"fare{i}": [f"정상{i}종금액", f"tolFare{i}", f"fare{i}", f"basicFare{i}"] for i in range(1, 9)},
-    **{f"d1_fare{i}": [f"1번째할인시간대할인{i}종금액", f"dcFare1_{i}", f"discountFare1_{i}"]
+    "start_code": ["dprtrTolofCd", "출발영업소코드", "startUnitCode", "startTcsCode"],
+    "start_name": ["dprtrTolofNm", "출발영업소명", "startUnitName", "startTcsName"],
+    "end_code": ["arrvTolofCd", "도착영업소코드", "endUnitCode", "endTcsCode"],
+    "end_name": ["arrvTolofNm", "도착영업소명", "endUnitName", "endTcsName"],
+    "operator_code": ["hoinstCd", "고속도로운영기관코드", "opCode", "corpCode"],
+    "operator_name": ["hoinstNm", "고속도로운영기관명", "opName", "corpName"],
+    **{f"fare{i}": [f"nrmlKnd{i}Amt", f"정상{i}종금액", f"tolFare{i}"] for i in range(1, 9)},
+    **{f"d1_fare{i}": [f"odn1DcKnd{i}Amt", f"1번째할인시간대할인{i}종금액", f"dcFare1_{i}"]
        for i in range(1, 9)},
-    "d1_start": ["1번째할인시간대할인시작시분", "dcStart1", "discountStart1"],
-    "d1_end": ["1번째할인시간대할인종료시분", "dcEnd1", "discountEnd1"],
-    **{f"d2_fare{i}": [f"2번째할인시간대할인{i}종금액", f"dcFare2_{i}", f"discountFare2_{i}"]
+    "d1_start": ["odn1DcStrtHhmm", "1번째할인시간대할인시작시분", "dcStart1"],
+    "d1_end": ["odn1DcEndHhmm", "1번째할인시간대할인종료시분", "dcEnd1"],
+    **{f"d2_fare{i}": [f"odn2DcKnd{i}Amt", f"2번째할인시간대할인{i}종금액", f"dcFare2_{i}"]
        for i in range(1, 9)},
-    "d2_start": ["2번째할인시간대할인시작시분", "dcStart2", "discountStart2"],
-    "d2_end": ["2번째할인시간대할인종료시분", "dcEnd2", "discountEnd2"],
+    "d2_start": ["odn2DcStrtHhmm", "2번째할인시간대할인시작시분", "dcStart2"],
+    "d2_end": ["odn2DcEndHhmm", "2번째할인시간대할인종료시분", "dcEnd2"],
 }
 
 # 이 셋이 매칭 안 되면 데이터로서 쓸모가 없다고 보고 즉시 중단한다.
@@ -78,7 +76,11 @@ def normalize_row(raw: dict) -> tuple[dict, int]:
     for col in STANDARD_COLUMNS:
         val = None
         for alias in FIELD_ALIASES[col]:
-            if alias in raw and raw[alias] not in (None, ""):
+            # 키 "존재 여부"로 매칭을 센다(값이 null이어도 매칭으로 친다) - 통행료 데이터는
+            # 할인 시간대가 없는 구간 등 정당한 null이 흔해서, 값으로 매칭을 판단하면
+            # 스키마 자체는 맞는데도 "매칭 부족"으로 오판해 정상 데이터를 실패시킨다.
+            # (실측: 출발=도착인 행에서 odn1Dc*/odn2Dc* 필드가 전부 null로 왔다.)
+            if alias in raw:
                 val = raw[alias]
                 matched += 1
                 break

@@ -1,8 +1,5 @@
 # hud-toll-data
 
-HUD Cockpit 앱이 쓰는 **고속도로 통행요금 데이터** 저장소.
-
-서버 없이 운영한다. 데이터를 이 저장소에 커밋해두면 앱은 jsDelivr CDN으로 그 결과를 받아간다.
 
 ```
 원본 데이터  →  이 저장소(data/)  →  jsDelivr CDN  →  앱

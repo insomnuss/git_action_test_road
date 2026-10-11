@@ -1,9 +1,9 @@
 {
-  "version": "data-20260816-0846",
-  "generated_at": "2026-08-16T13:04:10+00:00",
+  "version": "data-20261011-2121",
+  "generated_at": "2026-10-11T23:00:41+00:00",
   "source": "한국도로공사 영업소간 통행요금 조회 (OpenAPI, data.go.kr/data/15111644)",
   "source_file": "https://data.ex.co.kr/openapi/toll/bhoinstIntoTollList (자동 수집)",
-  "rows": 355664,
+  "rows": 120780,
   "columns": [
     "start_code",
     "start_name",
@@ -44,17 +44,17 @@
     {
       "name": "toll_fares.sqlite.gz",
       "note": "gzip SQLite (인덱스 포함) - 앱은 이걸 받아 압축 해제 후 바로 조회",
-      "bytes": 8309035,
-      "sha256": "9b3c9500c453a7cb1a195cec934875ef923c95f5514ee438dbfbe84ab29a2802",
-      "url": "https://cdn.jsdelivr.net/gh/insomnuss/git_action_test_road@data-20260816-0846/data/toll_fares.sqlite.gz",
-      "uncompressed_bytes": 42049536
+      "bytes": 3032090,
+      "sha256": "47574e3a713272fd3a7f2ec9fa03f3d10e5687bd06c3b3f6e3f632c240ab4ca7",
+      "url": "https://cdn.jsdelivr.net/gh/insomnuss/git_action_test_road@data-20261011-2121/data/toll_fares.sqlite.gz",
+      "uncompressed_bytes": 14036992
     },
     {
       "name": "toll_fares.csv.gz",
       "note": "gzip CSV - 다른 도구/디버깅용",
-      "bytes": 4542293,
-      "sha256": "5643a68a2c436a021e5ee3ec3bc37f9bd42b89340022c4e437022b50887c19cc",
-      "url": "https://cdn.jsdelivr.net/gh/insomnuss/git_action_test_road@data-20260816-0846/data/toll_fares.csv.gz"
+      "bytes": 1700897,
+      "sha256": "f698870f5cae5ace6e7cd1ae9e069eaf1cca9a41e48d18c599ddb885d9fd9cb2",
+      "url": "https://cdn.jsdelivr.net/gh/insomnuss/git_action_test_road@data-20261011-2121/data/toll_fares.csv.gz"
     }
   ]
 }
